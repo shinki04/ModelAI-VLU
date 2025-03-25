@@ -5,9 +5,11 @@ import tensorflow as tf
 from flask import Flask, request, render_template, redirect, url_for, send_from_directory
 from werkzeug.utils import secure_filename
 import pickle  # Để lưu trữ dữ liệu sai tạm thời
+from flask_cors import CORS
 
 # Khởi tạo Flask app
 app = Flask(__name__)
+CORS(app)
 app.config['UPLOAD_FOLDER'] = 'uploads/'
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
 DATA_FILE = 'retrain_data.pkl'  # File lưu dữ liệu sai

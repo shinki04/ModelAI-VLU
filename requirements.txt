@@ -1,5 +1,7 @@
-flask
+Flask
 tensorflow
-opencv-python
 numpy
-matplotlib
+opencv-python
+werkzeug
+flask-cors
+gunicorn
