@@ -4,9 +4,11 @@ import numpy as np
 import tensorflow as tf
 from flask import Flask, request, render_template, redirect, url_for, send_from_directory
 from werkzeug.utils import secure_filename
-import pickle  # Để lưu trữ dữ liệu sai tạm thời
+import pickle
+import matplotlib
+matplotlib.use('Agg')
 from flask_cors import CORS
-
+import matplotlib.pyplot as plt
 # Khởi tạo Flask app
 app = Flask(__name__)
 CORS(app)
@@ -26,14 +28,52 @@ X_mnist_train = tf.keras.utils.normalize(X_mnist_train, axis=1)
 # Hàm xử lý và dự đoán ảnh
 def predict_digit(img_path):
     try:
-        img = cv2.imread(img_path)[:, :, 0]
-        img = cv2.resize(img, (28, 28))
-        img = np.invert(np.array([img]))
-        img = tf.keras.utils.normalize(img, axis=1)
-        prediction = model.predict(img)
-        predicted_digit = np.argmax(prediction)
-        confidence = round(float(max(prediction[0]) * 100), 2)
-        return f"{predicted_digit} ({confidence}%)", True
+        # Đọc hình ảnh dưới dạng thang độ xám
+        image = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
+
+        # Sử dụng adaptive thresholding để tách chữ số khỏi nền
+        binary_image = cv2.adaptiveThreshold(image, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                             cv2.THRESH_BINARY_INV, 11, 2)
+
+        # Làm dày nét chữ
+        kernel = np.ones((3, 3), np.uint8)
+        binary_image = cv2.dilate(binary_image, kernel, iterations=1)
+
+        # Tìm contour để căn giữa chữ số
+        contours, _ = cv2.findContours(binary_image, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if contours:
+            contour = max(contours, key=cv2.contourArea)
+            x, y, w, h = cv2.boundingRect(contour)
+
+            # Cắt chữ số và căn giữa
+            digit = binary_image[y:y+h, x:x+w]
+            max_dim = max(w, h)
+            top = (max_dim - h) // 2
+            bottom = max_dim - h - top
+            left = (max_dim - w) // 2
+            right = max_dim - w - left
+            digit = cv2.copyMakeBorder(digit, top, bottom, left, right, cv2.BORDER_CONSTANT, value=0)
+
+            # Resize về 20x20 pixel (để chừa biên 4 pixel mỗi bên, giống MNIST)
+            digit = cv2.resize(digit, (20, 20), interpolation=cv2.INTER_AREA)
+
+            # Tạo hình ảnh 28x28 và đặt chữ số vào trung tâm
+            final_image = np.zeros((28, 28), dtype=np.uint8)
+            final_image[4:24, 4:24] = digit
+
+            # Chuẩn hóa về [0, 1]
+            final_image = final_image / 255.0
+
+            # Thêm batch dimension để dự đoán
+            final_image = np.array([final_image])
+
+            # Dự đoán
+            prediction = model.predict(final_image)
+            predicted_digit = np.argmax(prediction)
+            confidence = round(float(max(prediction[0]) * 100), 2)
+            return f"{predicted_digit} ({confidence}%)", True
+        else:
+            return "No digit found in the image", False
     except Exception as e:
         return str(e), False
 
@@ -55,7 +95,7 @@ def save_retrain_data(img, true_digit):
 # Hàm huấn luyện lại mô hình
 def retrain_model():
     if not os.path.exists(DATA_FILE):
-        return False, "No retraining data available."
+        return False, "No retraining data available.", None
 
     with open(DATA_FILE, 'rb') as f:
         X_retrain, y_retrain = pickle.load(f)
@@ -68,16 +108,42 @@ def retrain_model():
     X_combined = np.concatenate((X_retrain, X_mnist_train[indices]), axis=0)
     y_combined = np.concatenate((y_retrain, y_mnist_train[indices]), axis=0)
 
-    # Huấn luyện lại mô hình
+    # Huấn luyện lại mô hình và lưu lịch sử
     optimizer = tf.keras.optimizers.Adam(learning_rate=0.0001)
     model.compile(optimizer=optimizer, loss='sparse_categorical_crossentropy', metrics=['accuracy'])
-    model.fit(X_combined, y_combined, epochs=10, verbose=0)
+    history = model.fit(X_combined, y_combined, epochs=10, verbose=0)
     model.save('handwritten_digits.keras')
 
     # Xóa dữ liệu tạm sau khi huấn luyện
     os.remove(DATA_FILE)
-    return True, "Model retrained successfully!"
+    return True, "Model retrained successfully!", history
 
+# Hàm vẽ biểu đồ và lưu dưới dạng file
+def plot_training_history(history):
+    if not os.path.exists('static'):
+        os.makedirs('static')
+
+    # Vẽ biểu đồ độ chính xác
+    plt.figure(figsize=(6, 4))
+    plt.plot(history.history['accuracy'], label='Training Accuracy')
+    plt.title('Model Accuracy')
+    plt.xlabel('Epochs')
+    plt.ylabel('Accuracy')
+    plt.legend()
+    plt.savefig('static/accuracy_plot.png')
+    plt.close()
+
+    # Vẽ biểu đồ hàm mất mát
+    plt.figure(figsize=(6, 4))
+    plt.plot(history.history['loss'], label='Training Loss')
+    plt.title('Model Loss')
+    plt.xlabel('Epochs')
+    plt.ylabel('Loss')
+    plt.legend()
+    plt.savefig('static/loss_plot.png')
+    plt.close()
+
+    return 'accuracy_plot.png', 'loss_plot.png'
 
 # Route để phục vụ file từ uploads/
 @app.route('/uploads/<filename>')
@@ -141,14 +207,22 @@ def retrain():
     num_samples = save_retrain_data(img, true_digit)
     
     # Thử huấn luyện lại nếu đủ dữ liệu
-    success, message = retrain_model()
+    success, message, history = retrain_model()
+    
+    # Vẽ biểu đồ nếu huấn luyện thành công
+    accuracy_plot, loss_plot = None, None
+    if success and history is not None:
+        accuracy_plot, loss_plot = plot_training_history(history)
+    
+    # Dự đoán lại sau khi huấn luyện
     new_prediction, _ = predict_digit(file_path)
     
     return render_template('result.html', results=[{
         'filename': filename,
         'prediction': new_prediction,
         'image_path': url_for('uploaded_file', filename=filename)
-    }], message=f"Added to retraining data ({num_samples} samples). {message}")
+    }], message=f"Added to retraining data ({num_samples} samples). {message}",
+    accuracy_plot=accuracy_plot, loss_plot=loss_plot)
 
 if __name__ == '__main__':
     app.run(debug=True)
